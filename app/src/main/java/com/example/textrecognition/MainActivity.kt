@@ -28,10 +28,14 @@ import com.google.firebase.auth.auth
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Environment
 import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -60,8 +64,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetectorOptions
+import java.io.File
+import java.io.FileOutputStream
 
 
 const val WEB_CLIENT_ID = "645927644676-9furiq6n4mplruuk3dtlg9qcf5u2l59l.apps.googleusercontent.com"
@@ -91,7 +102,10 @@ class MainActivity : ComponentActivity() {
                     startDestination = startDestination
                 ) {
                     composable(route = NavigationRoutes.Login.route) {
-                        RealTimeTextRecognitionScreen()
+//                        RealTimeTextRecognitionScreen()
+                        GalleryImagePicker(onClick = {
+                            navController.navigate(NavigationRoutes.Home.route)
+                        })
 //                        LoginScreen(onSignInClick = {
 //                            val googleOption = GetGoogleIdOption.Builder()
 //                                .setFilterByAuthorizedAccounts(false)
@@ -132,7 +146,7 @@ class MainActivity : ComponentActivity() {
                     }
                     composable(route = NavigationRoutes.Home.route) {
                         Column {
-                            GalleryImagePicker()
+                            FaceDectection()
                             HomeScreen(
                                 currentUser = auth.currentUser,
                                 onSignOutClick = {
@@ -154,7 +168,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 @Composable
-fun GalleryImagePicker() {
+fun GalleryImagePicker(
+    onClick: () -> Unit
+) {
     val context = LocalContext.current
     var imageUri by remember { mutableStateOf<Uri?>(null) }
     var detectedText by remember { mutableStateOf("") }
@@ -185,6 +201,17 @@ fun GalleryImagePicker() {
         Button(onClick = { imagePickerLauncher.launch("image/*") }) {
             Text("Pick Image from Gallery")
         }
+        Button(onClick = {
+            onClick()
+            Log.d("LoginScreen", "Button Clicked")
+        }) {
+            Text(
+                text = "Face Detection",
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 20.sp
+            )
+        }
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -207,9 +234,10 @@ fun GalleryImagePicker() {
         // Show the detected text
         Text(
             text = "Detected Text: $detectedText",
-            color = textColor,
+            color = Color.Black,
             modifier = Modifier.padding(16.dp)
         )
+        copyToClipboard(context, detectedText)
     }
 }
 // Convert the Uri to InputImage for text recognition
@@ -335,5 +363,132 @@ fun processImageProxy(
                 // Close the imageProxy after processing
                 imageProxy.close()
             }
+    }
+}
+
+fun copyToClipboard(context: Context, text: String) {
+    val clipboardManager =
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val clip = ClipData.newPlainText("password", text)
+    clipboardManager.setPrimaryClip(clip)
+}
+
+@Composable
+fun FaceDectection() {
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    val context = LocalContext.current
+
+    // Step 1: Create an activity launcher to pick image from gallery
+    val pickImageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        // This is the URI of the image picked from the gallery
+        selectedImageUri = uri
+    }
+
+    // UI for picking and displaying image
+    Column(
+        modifier = Modifier.fillMaxSize().padding(16.dp)
+    ) {
+        Button(onClick = {
+            // Step 2: Launch the gallery
+            pickImageLauncher.launch("image/*")
+        }) {
+            Text("Pick Image from Gallery")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Step 3: Display the selected image and detect faces
+        selectedImageUri?.let { uri ->
+            val bitmap = getBitmapFromUri(context, uri)
+            bitmap?.let { bmp ->
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.size(200.dp)
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Trigger face detection and crop the detected face
+                DetectAndDisplayFace(bitmap = bmp)
+            }
+        }
+    }
+}
+
+// Helper function to convert URI to Bitmap
+fun getBitmapFromUri(context: Context, uri: Uri): Bitmap? {
+    return try {
+        val inputStream = context.contentResolver.openInputStream(uri)
+        BitmapFactory.decodeStream(inputStream)
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
+}
+
+@Composable
+fun DetectAndDisplayFace(bitmap: Bitmap) {
+    var detectedFaceBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    val context = LocalContext.current
+
+    // Perform face detection
+    LaunchedEffect(bitmap) {
+        detectFace(bitmap) { faceBitmap ->
+            detectedFaceBitmap = faceBitmap
+            // Optionally save to Pictures folder
+            saveBitmapToPicturesFolder(context, faceBitmap)
+        }
+    }
+
+    // Display the detected face if available
+    detectedFaceBitmap?.let { faceBmp ->
+        Text(text = "Detected Face:")
+        Image(bitmap = faceBmp.asImageBitmap(), contentDescription = null, modifier = Modifier.size(150.dp))
+    }
+}
+
+// Function to detect face and return the cropped face bitmap
+fun detectFace(image: Bitmap, onFaceCropped: (Bitmap) -> Unit) {
+    val options = FaceDetectorOptions.Builder()
+        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+        .build()
+
+    val inputImage = InputImage.fromBitmap(image, 0)
+    val detector = FaceDetection.getClient(options)
+
+    detector.process(inputImage)
+        .addOnSuccessListener { faces ->
+            if (faces.isNotEmpty()) {
+                val face = faces.first()
+                val faceRect = face.boundingBox
+
+                // Crop the face from the original image
+                val croppedFace = Bitmap.createBitmap(
+                    image,
+                    faceRect.left.coerceAtLeast(0),
+                    faceRect.top.coerceAtLeast(0),
+                    faceRect.width().coerceAtMost(image.width - faceRect.left),
+                    faceRect.height().coerceAtMost(image.height - faceRect.top)
+                )
+
+                onFaceCropped(croppedFace)
+            }
+        }
+        .addOnFailureListener { e ->
+            e.printStackTrace()
+        }
+}
+
+// Function to save the cropped face to the Pictures folder
+fun saveBitmapToPicturesFolder(context: Context, bitmap: Bitmap) {
+    val picturesDirectory =
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+    val file = File(picturesDirectory, "detected_face.jpg")
+
+    FileOutputStream(file).use { out ->
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
     }
 }
